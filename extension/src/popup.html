@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AdPilot</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; width: 320px;
+      font: 400 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+      background: #fafaf9; color: #18181b;
+    }
+    header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #e7e5e4; background: #fff; }
+    .logo { width: 24px; height: 24px; border-radius: 7px; background: #2a78d6; color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 13px; }
+    .title { font-weight: 600; font-size: 13px; flex: 1; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #d6d3d1; }
+    .dot.on { background: #008300; }
+    main { padding: 14px; }
+    h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: #82807c; margin: 0 0 8px; font-weight: 600; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+    .stat { background: #fff; border: 1px solid #e7e5e4; border-radius: 9px; padding: 9px 10px; }
+    .stat b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+    .stat span { font-size: 10px; color: #82807c; }
+    input {
+      width: 100%; padding: 9px 10px; border: 1px solid #e7e5e4; border-radius: 8px; font: inherit;
+      background: #fff; color: inherit; letter-spacing: .18em; text-transform: uppercase; text-align: center; font-weight: 600;
+    }
+    input.plain { letter-spacing: normal; text-transform: none; text-align: left; font-weight: 400; font-size: 12px; }
+    input:focus { outline: 2px solid #2a78d6aa; outline-offset: -1px; border-color: #2a78d6; }
+    button {
+      width: 100%; padding: 9px 10px; border: 0; border-radius: 8px; font: inherit; font-weight: 600;
+      background: #2a78d6; color: #fff; cursor: pointer; margin-top: 8px;
+    }
+    button:hover { filter: brightness(1.08); }
+    button.ghost { background: transparent; color: #52514e; border: 1px solid #e7e5e4; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .row { display: flex; gap: 8px; }
+    .row button { margin-top: 0; }
+    .msg { margin-top: 10px; font-size: 11.5px; padding: 7px 9px; border-radius: 7px; }
+    .msg.err { background: #fee; color: #b91c1c; }
+    .msg.ok { background: #ecfdf3; color: #027a48; }
+    .hint { font-size: 11px; color: #82807c; margin: 8px 0 0; }
+    a { color: #2a78d6; }
+    details { margin-top: 12px; }
+    summary { font-size: 11px; color: #82807c; cursor: pointer; }
+    footer { padding: 10px 14px; border-top: 1px solid #e7e5e4; font-size: 10.5px; color: #a8a29e; display: flex; justify-content: space-between; }
+    .hide { display: none !important; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #0f0f0e; color: #fafaf9; }
+      header, .stat, input, button.ghost { background: #1a1a19; border-color: #383835; }
+      header { border-bottom-color: #383835; }
+      footer { border-top-color: #383835; }
+      .stat span, .hint, summary, footer { color: #8f8e86; }
+      button.ghost { color: #c3c2b7; }
+      .msg.err { background: #2a1414; color: #f87171; }
+      .msg.ok { background: #0f2419; color: #4ade80; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="logo">A</span>
+    <span class="title">AdPilot</span>
+    <span class="dot" id="dot"></span>
+  </header>
+
+  <main>
+    <!-- not paired -->
+    <section id="pairView" class="hide">
+      <h2>Pair this device</h2>
+      <p class="hint" style="margin-top:0">
+        Open your AdPilot dashboard → Devices → <b>Pair a device</b>, then enter the 8-character code.
+      </p>
+      <input id="code" maxlength="8" placeholder="ABCD2345" autocomplete="off" />
+      <button id="pairBtn">Pair device</button>
+      <details>
+        <summary>Advanced: API endpoint</summary>
+        <input class="plain" id="apiBase" placeholder="http://localhost:4000/api" style="margin-top:6px" />
+        <button class="ghost" id="saveApi">Save endpoint</button>
+      </details>
+    </section>
+
+    <!-- paired -->
+    <section id="mainView" class="hide">
+      <h2>Today</h2>
+      <div class="stats">
+        <div class="stat"><b id="sAds">0</b><span>ads seen</span></div>
+        <div class="stat"><b id="sClicks">0</b><span>clicks</span></div>
+        <div class="stat"><b id="sEarned">$0</b><span>earned</span></div>
+      </div>
+
+      <h2>Wallet</h2>
+      <div class="stat" style="margin-bottom:14px">
+        <b id="balance">$0.00</b>
+        <span id="lifetime">lifetime $0.00</span>
+      </div>
+
+      <div class="row">
+        <button class="ghost" id="testBtn">Show a test ad</button>
+        <button class="ghost" id="dashBtn">Dashboard</button>
+      </div>
+      <button class="ghost" id="unpairBtn" style="margin-top:8px">Unpair this device</button>
+      <p class="hint" id="statusLine"></p>
+    </section>
+
+    <div id="msg"></div>
+  </main>
+
+  <footer>
+    <span>Ads only while a model is thinking</span>
+    <span id="version"></span>
+  </footer>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

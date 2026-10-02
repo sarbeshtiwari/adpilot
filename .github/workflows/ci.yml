@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: adpilot
+          POSTGRES_PASSWORD: adpilot
+          POSTGRES_DB: adpilot_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://adpilot:adpilot@localhost:5432/adpilot_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      NODE_ENV: test
+      RATE_LIMIT_DISABLED: 'true'
+      SESSION_SECRET: ci-session-secret-not-a-real-one
+      IMPRESSION_SECRET: ci-impression-secret-not-a-real-one
+      DEV_ALLOW_PASSWORD_LOGIN: 'true'
+      PLATFORM_TIMEZONE: Asia/Kolkata
+      CORS_ORIGINS: http://localhost:5173
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate client and apply schema
+        working-directory: server
+        run: |
+          npx prisma generate
+          npx prisma db push --skip-generate
+
+      - name: Typecheck
+        run: |
+          npm -w server exec tsc -- --noEmit
+          npm -w panel exec tsc -- --noEmit
+
+      - name: Seed
+        working-directory: server
+        run: npx tsx prisma/seed.ts
+
+      - name: Test
+        working-directory: server
+        run: npx vitest run --reporter=verbose
+
+      - name: Payment flow (against the local gateway stand-in)
+        working-directory: server
+        env:
+          RAZORPAY_API_BASE: http://localhost:4100/v1
+          RAZORPAY_KEY_ID: rzp_test_localmock
+          RAZORPAY_KEY_SECRET: localmocksecret
+          RAZORPAY_WEBHOOK_SECRET: localmockwebhooksecret
+        run: |
+          npx tsx dev/mock-razorpay.ts &
+          npx tsx src/index.ts &
+          npx wait-on -t 30000 http://localhost:4100/v1 http://localhost:4000/api/health || sleep 8
+          npx tsx dev/test-payment-flow.ts
+
+      - name: Build
+        run: npm run build
+
+      - name: Extension syntax
+        run: |
+          node --check extension/src/background.js
+          node --check extension/src/content.js
+          node --check extension/src/popup.js
+          node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json'))"

@@ -1,0 +1,625 @@
+// AdPilot data model.
+// Money is stored as integer micro-USD (1 USD = 1_000_000 micros) to avoid float drift.
+// Enum-like columns are Strings rather than native enums so a new status never
+// needs a migration; the allowed values live in src/lib/constants.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------- identity
+
+model User {
+  id    String @id @default(uuid())
+  email String @unique
+  name  String
+  role  String // SUPER_ADMIN | VENDOR | END_USER
+  status String @default("ACTIVE") // ACTIVE | SUSPENDED | PENDING
+
+  /// Null for accounts that only ever sign in with Google.
+  passwordHash String?
+  /// Set when an erasure request is honoured; PII is scrubbed, ledger rows stay.
+  anonymizedAt DateTime?
+  googleId     String? @unique
+  avatarUrl    String?
+  emailVerified Boolean @default(false)
+
+  /// TOTP (RFC 6238). Mandatory for SUPER_ADMIN, optional for everyone else.
+  totpSecret      String?
+  totpEnabled     Boolean   @default(false)
+  totpConfirmedAt DateTime?
+
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  vendor        Vendor?
+  publisher     Publisher?
+  auditLogs     AuditLog[]
+  sessions      Session[]
+  recoveryCodes RecoveryCode[]
+  authTokens    AuthToken[]
+  consents      ConsentRecord[]
+  dataRequests  DataRequest[]
+  memberships   TeamMember[]  @relation("MemberUser")
+  invitesSent   TeamMember[]  @relation("InvitedBy")
+
+  @@index([role, status])
+}
+
+/// Server-side session. The cookie carries an opaque token; only its hash is
+/// stored, so a database leak cannot be replayed as a login.
+model Session {
+  id         String    @id @default(uuid())
+  userId     String
+  tokenHash  String    @unique
+  userAgent  String    @default("")
+  ipHash     String    @default("")
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// Single-use codes so losing an authenticator app is not a lockout.
+model RecoveryCode {
+  id       String    @id @default(uuid())
+  userId   String
+  codeHash String
+  usedAt   DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Panel access for someone other than the account owner.
+/// scope PLATFORM = super-admin console, scope VENDOR = one vendor's panel.
+model TeamMember {
+  id          String    @id @default(uuid())
+  userId      String
+  scope       String // PLATFORM | VENDOR
+  vendorId    String?
+  /// OWNER implies every permission and cannot be removed by a non-owner.
+  role        String    @default("MEMBER") // OWNER | ADMIN | MEMBER
+  /// JSON array of "section:action" grants, e.g. ["campaigns:read","wallet:update"]
+  permissions String    @default("[]")
+  status      String    @default("ACTIVE") // ACTIVE | INVITED | SUSPENDED
+  invitedById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user      User    @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy User?   @relation("InvitedBy", fields: [invitedById], references: [id])
+  vendor    Vendor? @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope, vendorId])
+  @@index([vendorId])
+  @@index([scope])
+}
+
+/// An advertiser company. Prepays into `balanceMicros`; campaigns draw it down.
+model Vendor {
+  id                  String   @id @default(uuid())
+  userId              String   @unique
+  companyName         String
+  website             String?
+  contactPhone        String?
+  country             String?
+  status              String   @default("PENDING") // PENDING | ACTIVE | SUSPENDED
+
+  // Collected during self-onboarding, reviewed by a super admin.
+  legalName     String?
+  taxId         String? // GSTIN / VAT / EIN
+  addressLine1  String?
+  addressLine2  String?
+  city          String?
+  state         String?
+  postalCode    String?
+  billingEmail  String?
+  industry      String?
+  onboardedAt   DateTime?
+  balanceMicros       BigInt   @default(0)
+  lifetimeSpendMicros BigInt   @default(0)
+  lifetimeTopUpMicros BigInt   @default(0)
+  notes               String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaigns   Campaign[]
+  recharges   Recharge[]
+  impressions Impression[]
+  ledger      LedgerEntry[]
+  team        TeamMember[]
+  invoices    Invoice[]
+
+  @@index([status])
+}
+
+/// An end user running the extension. Earns a share of every impression/click.
+model Publisher {
+  id                   String   @id @default(uuid())
+  userId               String   @unique
+  displayName          String
+  balanceMicros        BigInt   @default(0)
+  lifetimeEarnedMicros BigInt   @default(0)
+  paidOutMicros        BigInt   @default(0)
+  payoutMethod         String? // PAYPAL | BANK | UPI | CRYPTO
+  payoutDetails        String? // JSON blob, only readable by owner + super admin
+  taxCountry           String?
+  taxId                String?
+  /// Withholding applied at payout, in basis points.
+  withholdingBps       Int     @default(0)
+  // last resolved location, used for targeting; never exposed to vendors
+  country              String?
+  state                String?
+  city                 String?
+  area                 String?
+  adsEnabled           Boolean  @default(true)
+  // Delivery pacing is platform policy, set by a super admin. These are
+  // per-user OVERRIDES: null means "inherit the platform setting".
+  maxAdsPerHour        Int?
+  minSecondsBetweenAds Int?
+  blockedCategories    String   @default("")
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  devices      Device[]
+  impressions  Impression[]
+  payouts      Payout[]
+  ledger       LedgerEntry[]
+  riskEvents   RiskEvent[]
+  taxDocuments TaxDocument[]
+
+  @@index([country, state, city])
+}
+
+/// One installed extension instance. `keyHash` is the sha256 of the device key.
+model Device {
+  id          String    @id @default(uuid())
+  publisherId String
+  keyHash     String    @unique
+  label       String
+  platform    String? // macOS | Windows | Linux
+  browser     String?
+  extVersion  String?
+  lastSeenAt  DateTime?
+  revokedAt   DateTime?
+  /// Rolling fraud score; a device over the threshold stops being served.
+  riskScore   Int       @default(0)
+  blockedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  publisher   Publisher    @relation(fields: [publisherId], references: [id], onDelete: Cascade)
+  impressions Impression[]
+
+  @@index([publisherId])
+}
+
+// ---------------------------------------------------------------- campaigns
+
+model Campaign {
+  id                 String    @id @default(uuid())
+  vendorId           String
+  name               String
+  status             String    @default("DRAFT") // DRAFT | PENDING_REVIEW | ACTIVE | PAUSED | COMPLETED | REJECTED
+  category           String    @default("general")
+  pricingModel       String    @default("CPM_CPC") // CPM | CPC | CPM_CPC
+  cpmMicros          BigInt    @default(0)
+  cpcMicros          BigInt    @default(0)
+  totalBudgetMicros  BigInt    @default(0)
+  dailyBudgetMicros  BigInt    @default(0)
+  spentMicros        BigInt    @default(0)
+  /// Running total for `spentTodayDate`, maintained on every charge. Lets the
+  /// auction filter on daily pacing without aggregating per candidate.
+  spentTodayMicros   BigInt    @default(0)
+  spentTodayDate     String    @default("")
+  startAt            DateTime
+  endAt              DateTime
+  /// JSON: {"tz":"Asia/Kolkata","hours":[9,10,...],"days":[0..6]} — null means always on
+  dayparting         String?
+  frequencyCapPerDay Int       @default(0) // 0 = unlimited
+  priority           Int       @default(5) // 1..10, higher wins ties
+  reviewNote         String?
+  reviewedAt         DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  vendor      Vendor       @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  ads         Ad[]
+  geoRules    GeoRule[]
+  impressions Impression[]
+
+  @@index([status, startAt, endAt])
+  @@index([vendorId])
+}
+
+/// A creative. A campaign may hold several; the server rotates between them.
+model Ad {
+  id              String   @id @default(uuid())
+  campaignId      String
+  headline        String
+  body            String
+  imageUrl        String?
+  ctaText         String   @default("Learn more")
+  clickUrl        String
+  accent          String   @default("#4f46e5")
+  weight          Int      @default(1)
+  status          String   @default("ACTIVE") // ACTIVE | PAUSED | REJECTED
+  impressionCount Int      @default(0)
+  clickCount      Int      @default(0)
+  /// Destination safety check — re-run whenever clickUrl changes.
+  urlCheckedAt    DateTime?
+  urlVerdict      String?  // SAFE | SUSPICIOUS | BLOCKED | UNCHECKED
+  urlDetail       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  campaign    Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  impressions Impression[]
+
+  @@index([campaignId, status])
+}
+
+/// Geo targeting, evaluated most-specific-first. EXCLUDE rules beat INCLUDE rules.
+model GeoRule {
+  id         String @id @default(uuid())
+  campaignId String
+  mode       String @default("INCLUDE") // INCLUDE | EXCLUDE
+  country    String // ISO-2, "*" = any
+  state      String @default("*")
+  city       String @default("*")
+  area       String @default("*")
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([country, state, city])
+}
+
+// ---------------------------------------------------------------- delivery
+
+model Impression {
+  id          String  @id @default(uuid())
+  adId        String
+  campaignId  String
+  vendorId    String
+  publisherId String?
+  deviceId    String?
+
+  status      String    @default("SERVED") // SERVED | VIEWED | CLICKED | EXPIRED | VOID
+  servedAt    DateTime  @default(now())
+  confirmedAt DateTime?
+  dwellMs     Int       @default(0)
+
+  country String @default("XX")
+  state   String @default("")
+  city    String @default("")
+  area    String @default("")
+  ipHash  String @default("")
+
+  /// Which AI surface the ad rendered on, e.g. chatgpt.com / claude.ai / local-llm
+  hostApp   String @default("unknown")
+  modelHint String @default("")
+
+  costMicros     BigInt @default(0) // charged to the vendor
+  payoutMicros   BigInt @default(0) // credited to the end user
+  platformMicros BigInt @default(0) // kept by AdPilot
+
+  /// 0-100. Above the platform threshold the event is held rather than billed.
+  riskScore Int     @default(0)
+  flagged   Boolean @default(false)
+
+  ad        Ad           @relation(fields: [adId], references: [id])
+  campaign  Campaign     @relation(fields: [campaignId], references: [id])
+  vendor    Vendor       @relation(fields: [vendorId], references: [id])
+  publisher Publisher?   @relation(fields: [publisherId], references: [id])
+  device    Device?      @relation(fields: [deviceId], references: [id])
+  click     Click?
+  ledger    LedgerEntry[]
+
+  @@index([servedAt])
+  @@index([campaignId, servedAt])
+  @@index([publisherId, servedAt])
+  @@index([vendorId, servedAt])
+  @@index([status])
+}
+
+model Click {
+  id             String   @id @default(uuid())
+  impressionId   String   @unique
+  clickedAt      DateTime @default(now())
+  costMicros     BigInt   @default(0)
+  payoutMicros   BigInt   @default(0)
+  platformMicros BigInt   @default(0)
+  ipHash         String   @default("")
+  userAgent      String   @default("")
+
+  impression Impression @relation(fields: [impressionId], references: [id], onDelete: Cascade)
+
+  @@index([clickedAt])
+}
+
+// ---------------------------------------------------------------- money
+
+/// Append-only double-entry-ish journal. Every balance change writes one row.
+model LedgerEntry {
+  id           String   @id @default(uuid())
+  createdAt    DateTime @default(now())
+  type         String // VENDOR_TOPUP | VENDOR_SPEND | PUBLISHER_EARN | PUBLISHER_PAYOUT | PLATFORM_REVENUE | ADJUSTMENT | REFUND
+  amountMicros BigInt // signed, from the perspective of the account named below
+  account      String // VENDOR | PUBLISHER | PLATFORM
+  vendorId     String?
+  publisherId  String?
+  impressionId String?
+  balanceAfter BigInt?
+  note         String   @default("")
+  createdBy    String? // user id of the actor, null for system
+
+  vendor     Vendor?     @relation(fields: [vendorId], references: [id])
+  publisher  Publisher?  @relation(fields: [publisherId], references: [id])
+  impression Impression? @relation(fields: [impressionId], references: [id])
+
+  @@index([createdAt])
+  @@index([type, createdAt])
+  @@index([vendorId, createdAt])
+  @@index([publisherId, createdAt])
+}
+
+model Recharge {
+  id           String    @id @default(uuid())
+  vendorId     String
+  amountMicros BigInt
+  method       String    @default("MANUAL") // RAZORPAY | CARD | BANK | UPI | MANUAL
+  reference    String    @default("")
+  status       String    @default("PENDING") // PENDING | COMPLETED | FAILED
+  createdAt    DateTime  @default(now())
+  settledAt    DateTime?
+  approvedBy   String?
+  note         String    @default("")
+
+  // Payment gateway trail. gatewayOrderId is unique so a replayed webhook
+  // cannot credit the same wallet twice.
+  gateway         String? // razorpay
+  gatewayOrderId  String? @unique
+  gatewayPaymentId String?
+  gatewayAmount   Int? // minor units actually charged (paise)
+  gatewayCurrency String?
+  failureReason   String?
+  refundedMicros  BigInt  @default(0)
+
+  disputes Dispute[]
+  invoice  Invoice?
+
+  vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@index([vendorId, createdAt])
+  @@index([status])
+}
+
+model Payout {
+  id           String    @id @default(uuid())
+  publisherId  String
+  amountMicros BigInt
+  method       String
+  details      String    @default("")
+  status       String    @default("REQUESTED") // REQUESTED | APPROVED | PAID | REJECTED
+  requestedAt  DateTime  @default(now())
+  processedAt  DateTime?
+  processedBy  String?
+  reference    String    @default("")
+  note         String    @default("")
+  auto         Boolean   @default(false)
+  gateway      String?
+  gatewayPayoutId String?
+  failureReason String?
+  /// Set atomically before any external transfer is attempted.
+  claimedAt    DateTime?
+  claimedBy    String?
+
+  publisher Publisher @relation(fields: [publisherId], references: [id], onDelete: Cascade)
+
+  @@index([publisherId, requestedAt])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------- platform
+
+model SystemSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  actorId   String?
+  actorRole String   @default("SYSTEM")
+  action    String
+  entity    String   @default("")
+  entityId  String   @default("")
+  meta      String   @default("")
+  ip        String   @default("")
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([createdAt])
+  @@index([entity, entityId])
+}
+
+
+// ─────────────────────────────────────────────────────── operations
+
+/// Cooperative lock so scheduled work runs once across every API instance.
+model JobLock {
+  name       String   @id
+  holder     String
+  acquiredAt DateTime @default(now())
+  expiresAt  DateTime
+}
+
+/// Single-use tokens for password resets, email verification and team invites.
+model AuthToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  purpose   String // PASSWORD_RESET | EMAIL_VERIFY | TEAM_INVITE
+  expiresAt DateTime
+  usedAt    DateTime?
+  meta      String    @default("")
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@index([expiresAt])
+}
+
+model EmailLog {
+  id        String   @id @default(uuid())
+  to        String
+  template  String
+  subject   String
+  status    String   @default("SENT") // SENT | FAILED | SUPPRESSED
+  error     String?
+  meta      String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([to, createdAt])
+  @@index([template, createdAt])
+}
+
+// ─────────────────────────────────────────────────────── trust & safety
+
+/// Anything that looked wrong during delivery. Scores accumulate onto the
+/// device and the earner, and above the threshold delivery stops.
+model RiskEvent {
+  id           String   @id @default(uuid())
+  publisherId  String?
+  deviceId     String?
+  impressionId String?
+  type         String // CLICK_VELOCITY | SHORT_DWELL | DUPLICATE_IP | IMPOSSIBLE_TIMING | UA_MISMATCH
+  score        Int
+  detail       String   @default("")
+  createdAt    DateTime @default(now())
+
+  publisher Publisher? @relation(fields: [publisherId], references: [id], onDelete: Cascade)
+
+  @@index([publisherId, createdAt])
+  @@index([type, createdAt])
+}
+
+model UrlBlocklist {
+  id        String   @id @default(uuid())
+  pattern   String   @unique
+  reason    String
+  addedBy   String?
+  createdAt DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────────────── money integrity
+
+/// A gateway chargeback. The budget may already be spent, so resolution is a
+/// deliberate admin decision rather than an automatic clawback.
+model Dispute {
+  id              String    @id @default(uuid())
+  rechargeId      String
+  gatewayDisputeId String?  @unique
+  amountMicros    BigInt
+  status          String    @default("OPEN") // OPEN | WON | LOST | ACCEPTED
+  reason          String    @default("")
+  openedAt        DateTime  @default(now())
+  resolvedAt      DateTime?
+  resolvedBy      String?
+  note            String    @default("")
+
+  recharge Recharge @relation(fields: [rechargeId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+/// Sequentially numbered tax invoice for a settled top-up.
+model Invoice {
+  id           String   @id @default(uuid())
+  number       String   @unique
+  vendorId     String
+  rechargeId   String?  @unique
+  amountMicros BigInt
+  taxMicros    BigInt   @default(0)
+  totalMicros  BigInt
+  taxRateBps   Int      @default(0)
+  taxLabel     String   @default("")
+  currency     String   @default("USD")
+  status       String   @default("ISSUED") // ISSUED | CREDITED
+  issuedAt     DateTime @default(now())
+  meta         String   @default("")
+
+  vendor   Vendor    @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  recharge Recharge? @relation(fields: [rechargeId], references: [id])
+
+  @@index([vendorId, issuedAt])
+}
+
+/// Annual earnings statement for an earner, for their own tax filing.
+model TaxDocument {
+  id             String   @id @default(uuid())
+  publisherId    String
+  year           Int
+  grossMicros    BigInt
+  withheldMicros BigInt   @default(0)
+  netMicros      BigInt
+  country        String?
+  issuedAt       DateTime @default(now())
+
+  publisher Publisher @relation(fields: [publisherId], references: [id], onDelete: Cascade)
+
+  @@unique([publisherId, year])
+}
+
+// ─────────────────────────────────────────────────────── privacy
+
+model ConsentRecord {
+  id            String   @id @default(uuid())
+  userId        String?
+  deviceId      String?
+  policyVersion String
+  scope         String // ADS | ANALYTICS | LOCATION
+  granted       Boolean
+  ipHash        String   @default("")
+  createdAt     DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, scope, createdAt])
+}
+
+/// GDPR/DPDP subject requests: export a copy, or erase the account.
+model DataRequest {
+  id          String    @id @default(uuid())
+  userId      String
+  type        String // EXPORT | ERASE
+  status      String    @default("PENDING") // PENDING | COMPLETED | REJECTED
+  requestedAt DateTime  @default(now())
+  completedAt DateTime?
+  handledBy   String?
+  note        String    @default("")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, requestedAt])
+}

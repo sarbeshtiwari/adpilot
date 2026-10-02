@@ -1,0 +1,20 @@
+{
+  "name": "adpilot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AdPilot — ad network that monetises AI model thinking time",
+  "workspaces": ["server", "panel"],
+  "scripts": {
+    "setup": "npm install && npm run db:setup",
+    "db:setup": "npm -w server run db:push && npm -w server run seed",
+    "dev": "concurrently -n api,panel -c cyan,magenta \"npm -w server run dev\" \"npm -w panel run dev\"",
+    "dev:api": "npm -w server run dev",
+    "dev:panel": "npm -w panel run dev",
+    "build": "npm -w server run build && npm -w panel run build",
+    "seed": "npm -w server run seed",
+    "studio": "npm -w server run studio"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
